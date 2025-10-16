@@ -1,0 +1,180 @@
+import streamlit as st
+import streamlit_shadcn_ui as ui
+from config.sources import NEWS_SOURCES
+from utils.database import save_preferences, save_style_samples, get_style_samples, save_feedback, save_twitter_prefs, get_twitter_prefs, log_send
+from utils.scraper import scrape_sources, detect_trends, get_working_sources, scrape_sources_from_twitter
+from utils.ai_curator import curate_newsletter, regenerate_section
+from utils.email_sender import send_newsletter
+from utils.auth import (
+    init_auth, sign_up, sign_in, sign_out, reset_password,
+    get_current_user, is_authenticated, get_user_email, handle_auth_state_change
+)
+
+
+st.set_page_config(page_title="AI Newsletter MVP", page_icon="📰", layout="wide")
+
+# Initialize authentication
+init_auth()
+handle_auth_state_change()
+
+def show_auth_page():
+    """Show authentication page"""
+    st.title("📰 AI Newsletter MVP")
+    st.caption("Get curated AI insights delivered to your inbox every morning")
+    
+    # Authentication tabs
+    auth_tab, signup_tab = st.tabs(["Sign In", "Sign Up"])
+    
+    with auth_tab:
+        st.subheader("Sign In")
+        with st.form("signin_form"):
+            email = st.text_input("Email", placeholder="your@email.com")
+            password = st.text_input("Password", type="password")
+            submit = st.form_submit_button("Sign In")
+            
+            if submit:
+                if email and password:
+                    result = sign_in(email, password)
+                    if result["success"]:
+                        st.success(result["message"])
+                        st.rerun()
+                    else:
+                        st.error(result["message"])
+                else:
+                    st.error("Please fill in all fields")
+        
+        # Password reset
+        if st.button("Forgot Password?"):
+            reset_email = st.text_input("Enter your email for password reset", placeholder="your@email.com")
+            if reset_email:
+                result = reset_password(reset_email)
+                if result["success"]:
+                    st.success(result["message"])
+                else:
+                    st.error(result["message"])
+    
+    with signup_tab:
+        st.subheader("Sign Up")
+        with st.form("signup_form"):
+            new_email = st.text_input("Email", placeholder="your@email.com", key="signup_email")
+            new_password = st.text_input("Password", type="password", key="signup_password")
+            confirm_password = st.text_input("Confirm Password", type="password", key="signup_confirm")
+            submit_signup = st.form_submit_button("Sign Up")
+            
+            if submit_signup:
+                if new_email and new_password and confirm_password:
+                    if new_password == confirm_password:
+                        if len(new_password) >= 6:
+                            result = sign_up(new_email, new_password)
+                            if result["success"]:
+                                st.success(result["message"])
+                            else:
+                                st.error(result["message"])
+                        else:
+                            st.error("Password must be at least 6 characters long")
+                    else:
+                        st.error("Passwords do not match")
+                else:
+                    st.error("Please fill in all fields")
+
+def show_main_app():
+    """Show main newsletter application (original simple flow)"""
+    user_email = get_user_email()
+
+    # Header with user info and sign out
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.title("📰 Your Personalized AI Newsletter")
+        st.caption(f"Welcome back, {user_email}!")
+    with col2:
+        if st.button("Sign Out", type="secondary"):
+            sign_out()
+            st.rerun()
+
+    # Step 1: Topic Selection (tabs like before)
+    st.subheader("1. Choose Your Topics")
+    selected_categories = ui.tabs(
+        options=list(NEWS_SOURCES.keys()), 
+        default_value='AI', 
+        key="topic_tabs"
+    )
+    st.write(f"You selected: {selected_categories}")
+
+    # Step 2: Twitter sources
+    st.subheader("Twitter Sources (optional)")
+    existing_handles, existing_hashtags = get_twitter_prefs(user_email)
+    colh, colt = st.columns(2)
+    with colh:
+        handles_str = st.text_input("Handles (comma separated, without @)", value=",".join(existing_handles) if existing_handles else "", placeholder="sama, AndrewYNg")
+    with colt:
+        tags_str = st.text_input("Hashtags (comma separated, without #)", value=",".join(existing_hashtags) if existing_hashtags else "", placeholder="AI, GenAI")
+    if st.button("Save Twitter Sources", key="save_twitter"):
+        handles = [h.strip().lstrip('@') for h in handles_str.split(',') if h.strip()]
+        tags = [t.strip().lstrip('#') for t in tags_str.split(',') if t.strip()]
+        if save_twitter_prefs(user_email, handles, tags):
+            st.success("Saved Twitter sources.")
+        else:
+            st.error("Failed to save Twitter sources.")
+
+    tweet_count = st.slider("Number of tweets", 3, 20, 5)
+
+    # Step 3: Generate Button (email auto user's email)
+    if ui.button("Generate My Newsletter", key="generate_btn"):
+        with st.spinner("🔍 Scraping sources..."):
+            user_handles, user_hashtags = get_twitter_prefs(user_email)
+            articles = []
+            used_twitter = False
+            if user_handles or user_hashtags:
+                try:
+                    articles = scrape_sources_from_twitter(user_handles, user_hashtags, max_items=tweet_count)
+                    used_twitter = True
+                except Exception as e:
+                    st.warning("Twitter is unavailable; falling back to default sources.")
+                    articles = []
+            if not articles:
+                # Fallback to configured non-Twitter sources
+                articles = scrape_sources(selected_categories)
+                if used_twitter:
+                    st.info("Used default sources due to Twitter error or no recent tweets.")
+        
+        with st.spinner("🤖 AI is curating your newsletter..."):
+            newsletter_content = curate_newsletter(articles, [selected_categories])
+        
+        # Append sources list to the draft (for preview and email)
+        try:
+            unique_sources = []
+            seen = set()
+            for a in articles:
+                url = a.get('source') or ''
+                title = a.get('title') or ''
+                if url and url not in seen:
+                    seen.add(url)
+                    if title:
+                        unique_sources.append(f"- [{title}]({url})")
+                    else:
+                        unique_sources.append(f"- {url}")
+            if unique_sources:
+                sources_block = "\n".join(unique_sources)
+                newsletter_content += f"\n\nSOURCES:\n{sources_block}"
+        except Exception:
+            pass
+        
+        with st.spinner("📧 Sending email..."):
+            save_preferences(user_email, [selected_categories])
+            ok = send_newsletter(user_email, newsletter_content)
+        
+        if ok:
+            st.success("✅ Newsletter sent! Check your inbox.")
+        else:
+            st.error("Sending failed. Check RESEND_API_KEY and sender domain.")
+
+        st.markdown("### Preview:")
+        st.markdown(newsletter_content)
+
+# Main app logic
+if is_authenticated():
+    show_main_app()
+else:
+    show_auth_page()
+
+
