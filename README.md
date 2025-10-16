@@ -64,8 +64,8 @@ Note: `utils/database.py` reads `st.secrets["SUPABASE_URL"]` and `st.secrets["SU
 1. Clone:
 
    ```bash
-   git clone https://github.com/Siddhant-Goswami/MVP-c5.git
-   cd MVP-c5
+   git clone https://github.com/Janvi161945/Ai-Newsletter
+   cd Ai-Newsletter
    ```
 
 2. Create venv and install:
